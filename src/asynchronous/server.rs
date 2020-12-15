@@ -19,6 +19,7 @@ use futures::StreamExt as _;
 use std::marker::Unpin;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::net::UnixListener as SysUnixListener;
+use std::os::unix::net::UnixStream as SysUnixStream;
 use tokio::{
     self,
     io::split,
@@ -242,6 +243,78 @@ impl Server {
             }
             drop(conn_done_tx);
         });
+        Ok(())
+    }
+
+    pub async fn start_single(&mut self, stream: SysUnixStream)  -> Result<()> {
+        self.do_start_single(stream).await
+    }
+
+    async fn do_start_single(&mut self, stream: SysUnixStream) -> Result<()>
+    {
+        let methods = self.methods.clone();
+
+        let (disconnect_tx, mut close_conn_rx) = watch::channel(0);
+        self.disconnect_tx = Some(disconnect_tx);
+
+        let (conn_done_tx, all_conn_done_rx) = channel::<i32>(1);
+        self.all_conn_done_rx = Some(all_conn_done_rx);
+
+        let (stop_listen_tx, mut stop_listen_rx) = channel(1);
+        self.stop_listen_tx = Some(stop_listen_tx);
+
+        let listenfd = stream.as_raw_fd();
+        let stream = tokio::net::UnixStream::from_std(stream).unwrap();
+
+        
+        tokio::spawn(async move {
+
+            let (mut reader, mut writer) = split(stream);
+            let (tx, mut rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel(100);
+
+            let (req_done_tx, mut all_req_done_rx) = channel::<i32>(1);
+
+            tokio::spawn(async move {
+                while let Some(buf) = rx.recv().await {
+                    if let Err(e) = writer.write_all(&buf).await {
+                        error!("write_message got error: {:?}", e);
+                    }
+                }
+            });
+
+            loop {
+                let tx = tx.clone();
+                let methods = methods.clone();
+                let req_done_tx2 = req_done_tx.clone();
+
+                tokio::select! {
+                    resp = receive(&mut reader) => {
+                        match resp {
+                            Ok(message) => {
+                                tokio::spawn(async move {
+                                    handle_request(tx, listenfd, methods, message).await;
+                                    drop(req_done_tx2);
+                                });
+                            }
+                            Err(e) => {
+                                trace!("error {:?}", e);
+                                break;
+                            }
+                        }
+                    }
+                    v = close_conn_rx.recv() => {
+                        // 0 is the init value of this watch, not a valid signal
+                        // is_none means the tx was dropped.
+                        if v.is_none() || v.unwrap() != 0 {
+                            info!("Stop accepting new connections.");
+                            break;
+                        }
+                    }
+                }
+            }
+
+        });
+        
         Ok(())
     }
 
