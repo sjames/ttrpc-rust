@@ -345,9 +345,10 @@ impl Server {
             let (fd_tx, mut fd_rx) = channel(1);
             tx.send(fd_tx).await.unwrap();
 
-            let fd = fd_rx.recv().await.unwrap();
-            self.listeners.clear();
-            self.listeners.push(fd);
+            if let Some(fd) = fd_rx.recv().await {
+                self.listeners.clear();
+                self.listeners.push(fd);
+            }
         }
     }
 }
