@@ -310,6 +310,11 @@ impl Server {
                             break;
                         }
                     }
+                    fd_tx = stop_listen_rx.recv() => {
+                        if let Some(mut fd_tx) = fd_tx {
+                            break;
+                        }
+                    }
                 }
             }
 
